@@ -11,4 +11,12 @@ import scrapy
 class ResScrapySpiderItem(scrapy.Item):
     # define the fields for your item here like:
     # name = scrapy.Field()
+
+    image_urls = scrapy.Field()
+    images = scrapy.Field()
+
+    topic_id = scrapy.Field()
+
+    image_paths = scrapy.Field()
+
     pass

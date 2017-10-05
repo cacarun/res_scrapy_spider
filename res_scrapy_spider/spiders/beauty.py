@@ -1,26 +1,30 @@
 # -*- coding: utf-8 -*-
 import scrapy
+import time
 
 from scrapy.http import Request, FormRequest
+from scrapy import Selector
 
-import urllib
-import urllib2
-import cookielib
-import re
-import time
-import random
+from bs4 import BeautifulSoup
+
+from items import ResScrapySpiderItem
+
 
 class BeautySpider(scrapy.Spider):
     name = 'beauty'
     allowed_domains = ['douban.com']
-    # start_urls = ['http://beauty.com/']
+
+    custom_settings = {
+        'IMAGES_STORE': './result_beauty/' + time.strftime('%Y%m%d_%X', time.localtime()).replace(':', ''),
+    }
 
     def __init__(self):
         # 初始化一些变量
         self.douban_header = {
             "User-Agent": "Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/56.0.2924.87 Safari/537.36"}
-        # self.douban_cookie = {}
 
+        self.login_retry = 3
+        self.login_account = 'https://accounts.douban.com'
         self.login_url = 'https://accounts.douban.com/login'
         self.login_form_data = {
             # 'redir': 'https://www.douban.com',
@@ -28,129 +32,136 @@ class BeautySpider(scrapy.Spider):
             'form_password': '',
             'login': u'登陆'
         }
+        # https://www.douban.com/group/topic/{image_name}/
 
-        self.cj = cookielib.CookieJar()
+        self.list_urls = self.get_urls()
 
-    def replace_all(self, text, dic):
-        for i, j in dic.iteritems():
-            text = text.replace(i, j)
-        return text
-
-    def browse(self, url, cj):
-        try:
-            req = urllib2.Request(url)
-            opener = urllib2.build_opener(urllib2.HTTPCookieProcessor(cj))
-            response = opener.open(req)
-            print ('BROSWE_REQUEST:\n' + url)
-            # print ('BROSWE_RESPONSE:\n' + response.read())
-            return response.read()
-        except:
-            return ''
-
-    def downImg(url, name):
-        fr = urllib.urlopen(url)
-        stream = fr.read(-1)
-        fr.close()
-        print ("save:" + url + "\r")
-        fw = open('results/' + name, 'w')
-        fw.write(stream)
-        fw.close()
-
-    def parse(self, response):
-        du = 'http://m.douban.com'
-        # set refresh_interval
-        refresh_interval = 1
-
-        if response.status == 200:
-            replace_dict = {'\n': '', '\t': '', ' ': '', '　': ''}
-            group_content = self.replace_all(response, replace_dict)
-            # print (group_content)
-            items = re.findall(
-                '<ahref="\/group\/topic\/(\d+)\/"title="(.*?)"><.*?<divclass="info">(\d+)回应', group_content)
-            if not items.__len__() == 0:
-                for i in items:
-                    item_title = i[1]
-                    item_title = item_title.replace('/', '')
-                    item_ID = i[0]
-                    item_comm = i[2]
-                    if int(item_comm) > 1:
-                        print (item_title + ' | ' + item_comm)
-                        item_url = du + '/group/topic/' + item_ID + '/'
-                        item_content = self.browse(item_url, self.cj)
-                        img_content = self.replace_all(item_content, replace_dict)
-                        imgs = re.findall(
-                            '<divclass="content_img"><imgsrc="(.*?)"/>', img_content)
-                        if not imgs.__len__() == 0:
-                            num = 0
-                            for img_url in imgs:
-                                num = num + 1
-                                filename = str(item_title) + str(num) + '.jpg'
-                                try:
-                                    self.downImg(img_url, filename)
-                                except:
-                                    pass
-                        time.sleep(refresh_interval * random.randint(1, 3))
-
-            time.sleep(refresh_interval)
-
-
-        else:
-            print 'request list page error %s -status code: %s:' % (response.url, response.status)
+    @staticmethod
+    def get_urls():
+        # 分页查找（豆瓣当前是按每页 25 条显示的）
+        # haixiuzu, 515085, 481977, 516876, 569879, 582663, jiatuizu, 368701
+        count = 160
+        list_urls_1 = ['https://www.douban.com/group/haixiuzu/discussion?start=' + str(i) for i in range(0, count, 25)]
+        return list_urls_1
 
     def start_requests(self):
+        print '=================== start_requests ===================='
         return [Request(
-            url=self.login_url,
+            url=self.login_account,
             meta={"cookiejar": 1},
             headers=self.douban_header,
-            callback=self.post_login)]
+            callback=self.check_login)]
+
+    def login(self):
+        print '[login] login retry: ' + str(self.login_retry)
+        if self.login_retry > 0:
+            return [Request(
+                url=self.login_url,
+                meta={"cookiejar": 1},
+                headers=self.douban_header,
+                callback=self.check_login)]
+        else:
+            print '[login] login try max!'
+
+    def check_login(self, response):
+        if response.status == 200:
+            title = response.xpath('//title/text()').extract()[0]
+            if u'登录豆瓣' in title:
+                print '[check_login] cookie empty, need to login'
+                return [Request(
+                    url=self.login_url,
+                    meta={"cookiejar": 1},
+                    headers=self.douban_header,
+                    callback=self.post_login)]
+            else:
+                print '[check_login] cookie exist, direct go'
+                self.crawl()
+        else:
+            print '[check_login] error %s, status code: %s' % (response.url, response.status)
 
     def post_login(self, response):
         if response.status == 200:
             captcha_url = response.xpath('//*[@id="captcha_image"]/@src').extract()  # 获取验证码图片的链接
             if len(captcha_url) > 0:
-                print 'manual input captcha，link url is：%s' % captcha_url
+                print '[post_login] manual input captcha, link url is: %s' % captcha_url
                 captcha_text = raw_input('Please input the captcha:')
                 self.login_form_data['captcha-solution'] = captcha_text
             else:
-                print 'no captcha'
-            print 'login processing......'
+                print '[post_login] no captcha'
+            print '[post_login] login processing......'
 
-            return [
-                FormRequest.from_response(
+            return [FormRequest.from_response(
                     response,
                     meta={"cookiejar": response.meta["cookiejar"]},
                     headers=self.douban_header,
                     formdata=self.login_form_data,
-                    callback=self.after_login
-                )
-            ]
+                    callback=self.after_login)]
 
         else:
-            print 'request login page error %s -status code: %s:' % (self.login_url, response.status)
+            print '[post_login] error %s, status code: %s' % (response.url, response.status)
 
     def after_login(self, response):
         if response.status == 200:
             title = response.xpath('//title/text()').extract()[0]
             if u'登录豆瓣' in title:
-                print 'login failed，please retry!'
+                print '[after_login] login failed, retry'
+                self.login_retry -= 1
+                self.login()
             else:
-                print 'login success!'
+                print '[after_login] login success!'
+                return self.crawl()
+        else:
+            print '[after_login] error %s, status code: %s' % (response.url, response.status)
 
-                # 分页查找（豆瓣当前是按每页 25 条显示的）
-                # hangzhou: 1
-                # shanghai: 2
-                list_urls = ['https://www.douban.com/group/haixiuzu/discussion?start=' + str(i) for i in range(0, 100, 25)]
-                # list_urls_2 = ['https://www.douban.com/group/467221/discussion?start=' + str(i) for i in range(0, 250, 25)]
-                # list_urls_sh = ['https://www.douban.com/group/homeatshanghai/discussion?start=' + str(i) for i in
-                #                 range(0, 250, 25)]
-                # list_urls.extend(list_urls_2)
-                # list_urls.extend(list_urls_sh)
+    def crawl(self):
+        for i in range(len(self.list_urls)):
+            url = self.list_urls[i]
+            print '[crawl] list page url: %s' % url
+            yield Request(url=url, headers=self.douban_header, callback=self.parse)
 
-                for i in range(len(list_urls)):
-                    url = list_urls[i]
-                    print 'list page url: %s' % url
-                    yield Request(url=url, headers=self.douban_header, callback=self.parse)
+    def parse(self, response):
+        if response.status == 200:
+            sel = Selector(response)
+            sites = sel.xpath('//table[@class="olt"]/tr[@class=""]')
+            for site in sites:
+                title = site.xpath('td[@class="title"]/a')
+                if title:
+                    detail_url = title.xpath('@href').extract()[0]
+                    if detail_url:
+                        # 请求详情页
+                        yield Request(url=detail_url, headers=self.douban_header, callback=self.parse_detail)
 
         else:
-            print 'request post login error %s -status code: %s:' % (self.login_url, response.status)
+            print '[parse] error %s, status code: %s' % (response.url, response.status)
 
+    def parse_detail(self, response):
+        if response.status == 200:
+            soup = BeautifulSoup(response.text, "html.parser")
+            topic_content = soup.find_all(attrs={'class': 'topic-content'})[1]
+            if topic_content:
+                try:
+                    image_array = []
+                    result_array = topic_content.find_all(['img'])
+                    for item in result_array:
+                        if item.name == 'img':
+                            img_src = item.get('src')
+                            image_array.append(img_src)
+
+                    if len(image_array) != 0:
+                        # print '======================================='
+                        # print 'URL:' + response.url
+                        # print image_array
+                        # print '======================================='
+
+                        item = ResScrapySpiderItem()
+                        item['image_urls'] = image_array
+                        item['topic_id'] = response.url.split('/')[-2]
+
+                        yield item
+
+                except Exception, e:
+                    print '[parse_detail] topic content parse error:', e
+            else:
+                print '[parse_detail] detail page topic content is null'
+        else:
+            print '[parse_detail] error %s, status code: %s' % (response.url, response.status)
